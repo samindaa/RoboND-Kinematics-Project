@@ -4,10 +4,11 @@ import numpy as np
 import collections
 import json
 import time
+from mpmath import radians
 from tf import transformations
 
 
-class Kuka(object):
+class Kuka210(object):
 
     def __init__(self):
         ### Create symbols for joint variables
@@ -33,6 +34,14 @@ class Kuka(object):
             self.alpha['alpha5']: -pi / 2, self.a['a5']: 0, self.d['d6']: 0,
             self.alpha['alpha6']: 0, self.a['a6']: 0, self.d['d7']: 0.303, self.q['q7']: 0
         }
+
+        # kr210.urdf.xacro
+        self.limit = {'theta1': {'lower': radians(-185), 'upper': radians(185)},
+                      'theta2': {'lower': radians(-45), 'upper': radians(85)},
+                      'theta3': {'lower': radians(-210), 'upper': radians(155 - 90)},
+                      'theta4': {'lower': radians(-350), 'upper': radians(350)},
+                      'theta5': {'lower': radians(-125), 'upper': radians(125)},
+                      'theta6': {'lower': radians(-350), 'upper': radians(350)}}
 
         # Homogeneous transformation
         self.T0_1 = self.T(self.alpha['alpha0'], self.a['a0'], self.q['q1'], self.d['d1'])
@@ -113,7 +122,6 @@ class Kuka(object):
             print("r_P  = ", r_P)
 
     def ik(self, req, x):
-
         (roll, pitch, yaw) = transformations.euler_from_quaternion([req.poses[x].orientation.x,
                                                                     req.poses[x].orientation.y,
                                                                     req.poses[x].orientation.z,
@@ -121,7 +129,8 @@ class Kuka(object):
 
         print('roll: {} pitch: {} yaw: {}'.format(roll, pitch, yaw))
 
-        Rot_EE_sub = self.Rot_EE.subs({self.r: roll, self.p: pitch, self.y: yaw})
+        Rot_rpy = self.Rot_EE.subs({self.r: roll, self.p: pitch, self.y: yaw})
+        Rot_rpy = Rot_rpy[0:3, 0:3]
 
         px = req.poses[x].position.x
         py = req.poses[x].position.y
@@ -131,7 +140,7 @@ class Kuka(object):
                      [py],
                      [pz]])
 
-        WC = EE - 0.303 * Rot_EE_sub[:-1, 2]  # (3, 1) vector
+        WC = EE - 0.303 * Rot_rpy[:, 2]  # (3, 1) vector
 
         # Calculate theta1 for joint1
         theta1 = atan2(WC[1], WC[0])
@@ -148,17 +157,32 @@ class Kuka(object):
         angle_b = acos((side_a ** 2 + side_c ** 2 - side_b ** 2) / (2. * side_a * side_c))
         # angle_c = acos((side_a**2 + side_b**2 - side_c**2) / (2. * side_a * side_b))
 
-        theta2 = np.pi / 2 - angle_a - atan2(len_y, len_x)
-        theta3 = np.pi / 2 - angle_b - 0.036  # ???
+        theta2 = pi / 2 - angle_a - atan2(len_y, len_x)
+        theta3 = pi / 2 - angle_b - 0.036  # ???
 
         R0_3 = self.T0_1[0:3, 0:3] * self.T1_2[0:3, 0:3] * self.T2_3[0:3, 0:3]
         R0_3 = R0_3.evalf(subs={self.q['q1']: theta1, self.q['q2']: theta2, self.q['q3']: theta3})
-        R3_6 = R0_3.inv("LU") * Rot_EE_sub[0:3, 0:3]
+        # R3_6 = R0_3.inv("LU") * Rot_EE_sub[0:3, 0:3]
+        R3_6 = R0_3.transpose() * Rot_rpy
 
         # For joint4, joint5, and joint6
         theta4 = atan2(R3_6[2, 2], -R3_6[0, 2])
         theta5 = atan2(sqrt(R3_6[0, 2] ** 2 + R3_6[2, 2] ** 2), R3_6[1, 2])
         theta6 = atan2(-R3_6[1, 1], R3_6[1, 0])
+
+        theta1 = theta1.evalf()
+        theta2 = theta2.evalf()
+        theta3 = theta3.evalf()
+        theta4 = theta4.evalf()
+        theta5 = theta5.evalf()
+        theta6 = theta6.evalf()
+
+        theta1 = np.clip(theta1, self.limit['theta1']['lower'], self.limit['theta1']['upper'])
+        theta2 = np.clip(theta2, self.limit['theta2']['lower'], self.limit['theta2']['upper'])
+        theta3 = np.clip(theta3, self.limit['theta3']['lower'], self.limit['theta3']['upper'])
+        theta4 = np.clip(theta4, self.limit['theta4']['lower'], self.limit['theta4']['upper'])
+        theta5 = np.clip(theta5, self.limit['theta5']['lower'], self.limit['theta5']['upper'])
+        theta6 = np.clip(theta6, self.limit['theta6']['lower'], self.limit['theta6']['upper'])
 
         print('EE: {} \nWC: {} \ntheta1: {}\ntheta2: {} \ntheta3: {} \ntheta4: {} \ntheta5: {} \ntheta6: {}'.
               format(EE, WC, theta1, theta2, theta3, theta4, theta5, theta6))
@@ -169,10 +193,11 @@ class Kuka(object):
                                     self.q['q4']: theta4,
                                     self.q['q5']: theta5,
                                     self.q['q6']: theta6})
-        #FK_rot = FK[0:3, 0:3]
-        #FK_x = FK[:, 3]
+        # FK_rot = FK[0:3, 0:3]
+        # FK_x = FK[:, 3]
 
         return theta1, theta2, theta3, theta4, theta5, theta6, FK, WC, EE
+
 
 test_cases = {1: [[[2.16135, -1.42635, 1.55109],
                    [0.708611, 0.186356, -0.157931, 0.661967]],
@@ -229,11 +254,10 @@ def test_code(test_case):
     ##
 
     ## Insert IK code here!
-    kuka = Kuka()
-    theta1, theta2, theta3, theta4, theta5, theta6, FK, WC, EE = kuka.ik(req, x)
+    theta1, theta2, theta3, theta4, theta5, theta6, FK, WC, EE = kuka210.ik(req, x)
 
     FK_rot = FK[0:3, 0:3]
-    FK_x = FK[:,3]
+    FK_x = FK[:, 3]
 
     print('EE_ground_truth:')
     print('[WC location]: {}'.format(test_case[1]))
@@ -291,9 +315,11 @@ def test_code(test_case):
 
 
 if __name__ == "__main__":
-    # kuka = Kuka()
+    kuka210 = Kuka210()
     # kuka.debug(
     #     '/Users/saminda/Udacity/RoboND/catkin_ws/src/RoboND-Kinematics-Project/proj2_debug/debug_joint_state.json')
 
-    test_case_number = 2
-    test_code(test_cases[test_case_number])
+    for i in range(1, 4):
+        test_case_number = i
+        test_code(test_cases[test_case_number])
+        print("===")
